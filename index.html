@@ -254,6 +254,9 @@ body.is-admin #admin.admin-only{display:block}
 /* МЕТКА «ТЕКСТ НА САЙТЕ» */
 .text-badge{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:#137F80;margin:0 0 10px}
 .text-badge .new{background:#137F80;color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:bold}
+/* ЗАКЛАДКА В ЧИТАЛКЕ */
+#rdText .bookmarked{border-left:4px solid var(--teal);padding-left:10px;margin-left:-14px;background:rgba(26,163,163,.12);border-radius:0 6px 6px 0}
+.rd-mark-item{font-weight:bold;color:var(--teal)}
 /* FOOTER */
 footer{margin-top:50px;padding:28px;background:linear-gradient(135deg,var(--dark-blue),var(--blue));color:white;text-align:center;font-family:var(--serif);font-style:italic}
 footer small{display:block;margin-top:6px;opacity:.75;font-size:13px}
@@ -273,6 +276,7 @@ footer small{display:block;margin-top:6px;opacity:.75;font-size:13px}
 <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
 <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></symbol>
 <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+<symbol id="i-bookmark" viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z"/></symbol>
 </svg>
 
 <header>
@@ -414,6 +418,7 @@ footer small{display:block;margin-top:6px;opacity:.75;font-size:13px}
 <div class="rd-bar">
 <button class="rd-btn" onclick="closeReader()" aria-label="Закрыть читалку">← Каталог</button>
 <div class="rd-title"><b id="rdTitle"></b><span id="rdChapter"></span></div>
+<button class="rd-btn" id="rdMarkBtn" onclick="setBookmark()" aria-label="Поставить закладку" title="Поставить закладку"><svg class="ico" aria-hidden="true"><use href="#i-bookmark"/></svg></button>
 <button class="rd-btn" id="rdTocBtn" onclick="togglePanel('rdToc')" aria-label="Содержание"><svg class="ico" aria-hidden="true"><use href="#i-menu"/></svg></button>
 <button class="rd-btn" id="rdSetBtn" onclick="togglePanel('rdSet')" aria-label="Настройки текста">Aa</button>
 </div>
@@ -1359,6 +1364,55 @@ function openReader(title, text) {
     setFrac(saved);
     updateReaderProgress();
     if (saved > 0.01) toast("Продолжаем с места, где вы остановились (" + Math.round(saved * 100) + "%)");
+    initBookmark(title);
+}
+
+/* ЗАКЛАДКА: одна на книгу; хранится в браузере, а у вошедшего — ещё и в аккаунте */
+function marksStore() { try { return JSON.parse(localStorage.getItem("bookhavenMarks") || "{}"); } catch (e) { return {}; } }
+function saveMarkLocal(title, idx) {
+    const marks = marksStore();
+    marks[title] = { idx };
+    try { localStorage.setItem("bookhavenMarks", JSON.stringify(marks)); } catch (e) {}
+}
+function topBlockIndex() {
+    const top = rdScroll().getBoundingClientRect().top, kids = document.getElementById("rdText").children;
+    for (let i = 0; i < kids.length; i++) if (kids[i].getBoundingClientRect().bottom - top > 8) return i;
+    return Math.max(0, kids.length - 1);
+}
+function showBookmark() {
+    const art = document.getElementById("rdText"), toc = document.getElementById("rdTocList");
+    art.querySelectorAll(".bookmarked").forEach(el => el.classList.remove("bookmarked"));
+    toc.querySelectorAll(".rd-mark-item").forEach(el => el.remove());
+    const m = marksStore()[rd.title], el = m && art.children[m.idx];
+    if (!el) return;
+    el.classList.add("bookmarked");
+    const b = document.createElement("button");
+    b.className = "rd-toc-item rd-mark-item";
+    b.textContent = "Закладка: " + el.textContent.slice(0, 40) + "…";
+    b.onclick = gotoBookmark;
+    toc.prepend(b);
+}
+function gotoBookmark() {
+    const m = marksStore()[rd.title], el = m && document.getElementById("rdText").children[m.idx];
+    if (!el) return;
+    const sc = rdScroll();
+    sc.scrollTop = el.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop - 12;
+    togglePanel("");
+}
+function setBookmark() {
+    if (!rd.title) return;
+    const idx = topBlockIndex();
+    saveMarkLocal(rd.title, idx);
+    showBookmark();
+    toast("Закладка поставлена");
+    if (window.saveMarkRemote) window.saveMarkRemote(rd.title, idx);
+}
+async function initBookmark(title) {
+    showBookmark();
+    if (!window.loadMarkRemote) return;
+    let idx = null;
+    try { idx = await window.loadMarkRemote(title); } catch (e) {}
+    if (idx !== null && rd.title === title) { saveMarkLocal(title, idx); showBookmark(); }
 }
 
 function closeReader() {
@@ -1541,6 +1595,21 @@ window.markRead = async title => {
     if (!readIds.includes(id)) readIds.push(id);
     await sb.from("read_list").upsert({ user_id: me.id, book_id: id }, { onConflict: "user_id,book_id" });
     refreshStats();
+};
+
+/* ЗАКЛАДКА В АККАУНТЕ (вошедший пользователь, книги каталога) */
+window.saveMarkRemote = async (title, idx) => {
+    const id = bookIds[title];
+    if (!me || !id) return;
+    await sb.from("read_progress").upsert(
+        { user_id: me.id, book_id: id, position: idx, updated_at: new Date().toISOString() },
+        { onConflict: "user_id,book_id" });
+};
+window.loadMarkRemote = async title => {
+    const id = bookIds[title];
+    if (!me || !id) return null;
+    const { data } = await sb.from("read_progress").select("position").eq("user_id", me.id).eq("book_id", id).maybeSingle();
+    return data ? Number(data.position) : null;
 };
 
 /* СТАТИСТИКА (на сервере) */
