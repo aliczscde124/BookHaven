@@ -260,3 +260,46 @@ $$;
 
 revoke execute on function public.admin_stats() from anon;
 grant execute on function public.admin_stats() to authenticated;
+
+-- ===== Изменение 2: гости читают, тексты книг загружает только администратор =====
+
+-- Гости читают каталог, отзывы и публичные имена. Писать могут только вошедшие.
+create policy "books: читают гости" on public.books
+  for select to anon using (true);
+create policy "reviews: читают гости" on public.reviews
+  for select to anon using (true);
+grant select on public.public_profiles to anon;
+
+-- Общие тексты книг: читают все, загружает и меняет только администратор
+create table public.book_texts (
+  book_id     bigint primary key references public.books(id) on delete cascade,
+  file_path   text not null,
+  words       int  not null default 0,
+  updated_at  timestamptz not null default now()
+);
+alter table public.book_texts enable row level security;
+create policy "book_texts: читают все" on public.book_texts
+  for select to anon, authenticated using (true);
+create policy "book_texts: меняет админ" on public.book_texts
+  for all to authenticated using (public.is_admin()) with check (public.is_admin());
+
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('book-texts', 'book-texts', false, 10485760)
+on conflict (id) do nothing;
+create policy "book-texts: читают все" on storage.objects
+  for select to anon, authenticated using (bucket_id = 'book-texts');
+create policy "book-texts: загружает админ" on storage.objects
+  for insert to authenticated with check (bucket_id = 'book-texts' and public.is_admin());
+create policy "book-texts: меняет админ" on storage.objects
+  for update to authenticated using (bucket_id = 'book-texts' and public.is_admin());
+create policy "book-texts: удаляет админ" on storage.objects
+  for delete to authenticated using (bucket_id = 'book-texts' and public.is_admin());
+
+-- Личные тексты пользователей больше не создаются: только администратор
+drop policy "user_texts: создаёт свой" on public.user_texts;
+create policy "user_texts: создаёт админ" on public.user_texts
+  for insert to authenticated with check (user_id = auth.uid() and public.is_admin());
+drop policy "texts: загружает в свою папку" on storage.objects;
+create policy "texts: загружает админ" on storage.objects
+  for insert to authenticated
+  with check (bucket_id = 'user-texts' and public.is_admin());

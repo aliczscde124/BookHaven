@@ -225,11 +225,14 @@ html{scroll-behavior:smooth}
 }
 @media (prefers-reduced-motion:reduce){.modal-content,.hero-cta,html{animation:none;transition:none;scroll-behavior:auto}}
 /* ВХОД И РЕГИСТРАЦИЯ */
-body.auth-pending .app,body.is-guest .app{display:none}
-.authgate{display:none;justify-content:center;align-items:center;min-height:calc(100vh - 140px);padding:40px 16px}
-body.is-guest .authgate{display:flex}
-body.is-guest nav,body.is-guest #profileBtn,body.auth-pending #profileBtn{display:none}
-.auth-card{width:min(420px,100%);background:var(--warm-white);border:1px solid #D7E7EC;border-radius:16px;padding:28px 26px;box-shadow:0 15px 40px rgba(15,45,65,.2)}
+body.auth-pending .app{display:none}
+.authgate{display:none}
+.authgate.show{display:flex;position:fixed;inset:0;z-index:1200;background:rgba(15,45,65,.65);justify-content:center;align-items:center;padding:20px;overflow-y:auto}
+body.is-guest #profileBtn,body.auth-pending #profileBtn{display:none}
+.login-btn{display:none;background:transparent;border:1px solid rgba(255,255,255,.75);color:#fff;border-radius:20px;padding:8px 16px;cursor:pointer;font-size:15px}
+body.is-guest .login-btn{display:inline-block}
+body:not(.is-admin) .add-row,body:not(.is-admin) .tt-add,body:not(.is-admin) .tt-del{display:none!important}
+.auth-card{position:relative;width:min(420px,100%);background:var(--warm-white);border:1px solid #D7E7EC;border-radius:16px;padding:28px 26px;box-shadow:0 15px 40px rgba(15,45,65,.2)}
 .auth-card h2{margin:0 0 6px;text-align:center;font-family:var(--serif);font-weight:400;color:var(--dark-blue);font-size:26px}
 .auth-sub{margin:0 0 18px;text-align:center;color:var(--muted);font-family:var(--serif);font-style:italic}
 .auth-tabs{display:flex;gap:8px;margin-bottom:12px}
@@ -286,12 +289,14 @@ footer small{display:block;margin-top:6px;opacity:.75;font-size:13px}
 <button class="admin-only" onclick="scrollToSection('admin')">Статистика</button>
 <button class="admin-only" onclick="openEditor()">Редактор</button>
 </nav>
+<button class="login-btn" id="loginBtn" onclick="showAuth()">Войти</button>
 <button class="profile-btn" id="profileBtn" onclick="showProfile()" aria-label="Профиль" title="Профиль"></button>
 </header>
 <section class="authgate" id="authGate" aria-labelledby="authTitle">
 <div class="auth-card">
+<button type="button" class="close" onclick="hideAuth()" aria-label="Закрыть">×</button>
 <h2 id="authTitle">Вход в BookHaven</h2>
-<p class="auth-sub">Войдите, чтобы открыть каталог, отзывы и профиль</p>
+<p class="auth-sub">Книги и отзывы доступны и без входа. Войдите, чтобы оставить отзыв</p>
 <div class="auth-tabs" role="tablist">
 <button type="button" id="tabLogin" class="on" role="tab" aria-selected="true" onclick="showAuthTab('login')">Вход</button>
 <button type="button" id="tabRegister" role="tab" aria-selected="false" onclick="showAuthTab('register')">Регистрация</button>
@@ -1084,6 +1089,7 @@ function renderCustomBooks() {
 }
 
 async function addFilesToLibrary(files) {
+    if (!(window.isAdmin && window.isAdmin())) { toast("Загружать тексты может только администратор."); return; }
     const list = customList(), errors = [];
     let added = 0;
     for (const file of files) {
@@ -1091,6 +1097,7 @@ async function addFilesToLibrary(files) {
             const text = await fileToText(file);
             const title = uniqueTitle(file.name.replace(/\.[^.]+$/, "").replace(/_+/g, " ").trim().slice(0, 80) || "Без названия");
             await saveText(title, text);
+            if (window.isSignedIn && window.isSignedIn()) { added++; continue; }
             const meta = { title, words: (text.match(/\S+/g) || []).length, file: file.name, server: window.isSignedIn && window.isSignedIn() };
             if (!meta.server) list.push(meta);
             const card = makeCustomCard(meta);
@@ -1434,12 +1441,16 @@ function friendly(m) {
 function applySession(session) {
     document.body.classList.remove("auth-pending");
     document.body.classList.toggle("is-guest", !session);
-    if (session) onSignedIn(session);
-    else {
-        leavePresence();
-        me = null; profileData = null; readIds = []; serverTexts = {};
-        document.querySelectorAll(".book-card:not([data-custom]), .book-card[data-server]").forEach(c => c.remove());
+    if (session) {
+        hideAuth();
+        onSignedIn(session);
+        return;
     }
+    leavePresence();
+    me = null; profileData = null; readIds = []; serverTexts = {};
+    document.body.classList.remove("is-admin");
+    document.querySelectorAll(".book-card[data-server]").forEach(c => c.remove());
+    loadCatalog().then(() => loadReviews()).then(() => updateAllBookRatings());
 }
 sb.auth.onAuthStateChange((_event, session) => applySession(session));
 sb.auth.getSession().then(({ data }) => applySession(data.session));
@@ -1618,33 +1629,38 @@ function updateAllBookRatings() {
 
 async function openReviews(title) {
     const id = bookIds[title];
-    if (!id || !me) {
+    if (!id) {
         openModal(`<h2>${ic("chat")} Отзывы: ${escapeHTML(title)}</h2><p>Отзывы для этой книги пока недоступны.</p>`);
         return;
     }
     if (!(await loadReviews())) { alert("Не удалось загрузить отзывы. Попробуйте ещё раз."); return; }
     const list = reviewsByBook[id] || [];
-    const mine = list.find(r => r.user_id === me.id);
+    const mine = me ? list.find(r => r.user_id === me.id) : null;
 
     let html = `<h2>${ic("chat")} Отзывы: ${escapeHTML(title)}</h2>`;
     if (list.length === 0) html += `<p>Это произведение ещё не оценили. Будьте первым!</p>`;
     list.forEach(r => {
         const date = new Date(r.created_at).toLocaleDateString("ru-RU");
         const changed = new Date(r.updated_at) > new Date(r.created_at) ? " · изменено" : "";
-        const mark = r.user_id === me.id ? " <small>(вы)</small>" : "";
-        const canDelete = r.user_id === me.id || me.role === "admin";
+        const mark = me && r.user_id === me.id ? " <small>(вы)</small>" : "";
+        const canDelete = me && (r.user_id === me.id || me.role === "admin");
         html += `<div class="review-item"><strong>${escapeHTML(r.name)}</strong>${mark}
             <div class="review-stars">${starsHTML(r.rating)}</div>
             <p>${escapeHTML(r.text)}</p><small>${escapeHTML(date + changed)}</small>
             ${canDelete ? `<div><button class="btn danger" data-id="${r.id}" data-title="${escapeHTML(title)}" onclick="deleteReview(this)">Удалить</button></div>` : ""}</div>`;
     });
 
-    const options = [5, 4, 3, 2, 1].map(n =>
-        `<option value="${n}"${mine && mine.rating === n ? " selected" : ""}>${RATING_LABELS[n]}</option>`).join("");
-    html += `<div class="review-form"><h3>${mine ? "Ваш отзыв" : "Оставить отзыв"}</h3>
-        <select id="reviewRating">${options}</select>
-        <textarea id="reviewText" maxlength="2000" placeholder="Ваш отзыв...">${escapeHTML(mine ? mine.text : "")}</textarea>
-        <button data-title="${escapeHTML(title)}" onclick="saveReview(this.dataset.title)">${mine ? "Сохранить изменения" : "Отправить отзыв"}</button></div>`;
+    if (!me) {
+        html += `<div class="review-form"><p>Чтобы оставить отзыв, войдите или зарегистрируйтесь.</p>
+            <button onclick="showAuth()">Войти</button></div>`;
+    } else {
+        const options = [5, 4, 3, 2, 1].map(n =>
+            `<option value="${n}"${mine && mine.rating === n ? " selected" : ""}>${RATING_LABELS[n]}</option>`).join("");
+        html += `<div class="review-form"><h3>${mine ? "Ваш отзыв" : "Оставить отзыв"}</h3>
+            <select id="reviewRating">${options}</select>
+            <textarea id="reviewText" maxlength="2000" placeholder="Ваш отзыв...">${escapeHTML(mine ? mine.text : "")}</textarea>
+            <button data-title="${escapeHTML(title)}" onclick="saveReview(this.dataset.title)">${mine ? "Сохранить изменения" : "Отправить отзыв"}</button></div>`;
+    }
     openModal(html);
 }
 
@@ -1696,6 +1712,9 @@ async function loadCatalog() {
     booksList = data || [];
     bookIds = Object.fromEntries(booksList.map(b => [b.title, b.id]));
     booksList.forEach(b => { descriptions[b.title] = b.description; });
+    const { data: bt } = await sb.from("book_texts").select("book_id,file_path");
+    const pathById = Object.fromEntries((bt || []).map(t => [t.book_id, t.file_path]));
+    bookTextByTitle = Object.fromEntries(booksList.filter(b => pathById[b.id]).map(b => [b.title, pathById[b.id]]));
     const box = document.querySelector(".books");
     box.querySelectorAll(".book-card:not([data-custom])").forEach(c => c.remove());
     box.insertAdjacentHTML("afterbegin", booksList.map(bookCardHTML).join(""));
@@ -1838,10 +1857,20 @@ window.setRole = setRole;
 window.removeTextAdmin = removeTextAdmin;
 window.loadCatalog = loadCatalog;
 
+/* ОКНО ВХОДА поверх сайта */
+window.showAuth = tab => {
+    window.showAuthTab(tab || "login");
+    document.getElementById("authGate").classList.add("show");
+};
+window.hideAuth = () => document.getElementById("authGate").classList.remove("show");
+document.getElementById("authGate").addEventListener("click", e => { if (e.target === e.currentTarget) hideAuth(); });
+
 /* СВОИ ТЕКСТЫ В ХРАНИЛИЩЕ (вошедший пользователь) */
 let serverTexts = {};   // название → { id, file_path, words, book_id }
+let bookTextByTitle = {};   // название книги → путь к общему тексту книги
 window.isSignedIn = () => !!me;
-window.serverTitles = () => Object.keys(serverTexts);
+window.isAdmin = () => !!(me && me.role === "admin");
+window.serverTitles = () => [...Object.keys(serverTexts), ...Object.keys(bookTextByTitle)];
 
 async function loadUserTexts() {
     const { data, error } = await sb.from("user_texts")
@@ -1862,32 +1891,43 @@ function renderServerCustomBooks() {
 }
 
 window.saveTextRemote = async (title, text) => {
+    if (!window.isAdmin()) throw new Error("Загружать тексты может только администратор.");
     const words = (text.match(/\S+/g) || []).length;
-    const old = serverTexts[title];
-    const path = `${me.id}/${Date.now()}-${Math.random().toString(36).slice(2)}.txt`;
-    const { error: upErr } = await sb.storage.from("user-texts")
-        .upload(path, new Blob([text], { type: "text/plain" }), { contentType: "text/plain; charset=utf-8" });
-    if (upErr) throw new Error("Не удалось загрузить текст: " + upErr.message);
-    const { error } = await sb.from("user_texts").upsert(
-        { user_id: me.id, title, book_id: bookIds[title] || null, file_path: path, words },
-        { onConflict: "user_id,title" });
-    if (error) {
-        await sb.storage.from("user-texts").remove([path]);
-        throw new Error("Не удалось сохранить текст: " + error.message);
+    let id = bookIds[title];
+    if (!id) {
+        const { data, error } = await sb.from("books")
+            .insert({ title, author: "", genre: "Мои тексты", pages: 0, description: "" }).select("id").single();
+        if (error) throw new Error("Не удалось добавить книгу: " + error.message);
+        id = data.id;
     }
-    if (old && old.file_path !== path) await sb.storage.from("user-texts").remove([old.file_path]);
-    await loadUserTexts();
+    const path = `${id}.txt`;
+    const { error: upErr } = await sb.storage.from("book-texts")
+        .upload(path, new Blob([text], { type: "text/plain" }), { contentType: "text/plain; charset=utf-8", upsert: true });
+    if (upErr) throw new Error("Не удалось загрузить текст: " + upErr.message);
+    const { error } = await sb.from("book_texts").upsert({ book_id: id, file_path: path, words }, { onConflict: "book_id" });
+    if (error) throw new Error("Не удалось сохранить текст: " + error.message);
+    await loadCatalog();
 };
 
 window.fetchServerText = async title => {
-    const t = serverTexts[title];
-    if (!t) return null;
-    const { data, error } = await sb.storage.from("user-texts").download(t.file_path);
+    const bookPath = bookTextByTitle[title];
+    const userPath = serverTexts[title] && serverTexts[title].file_path;
+    const path = bookPath || userPath;
+    if (!path) return null;
+    const { data, error } = await sb.storage.from(bookPath ? "book-texts" : "user-texts").download(path);
     if (error) throw new Error("Не удалось открыть текст: " + error.message);
     return await data.text();
 };
 
 window.deleteTextRemote = async title => {
+    if (bookTextByTitle[title]) {
+        if (!window.isAdmin()) throw new Error("Удалять тексты может только администратор.");
+        await sb.storage.from("book-texts").remove([bookTextByTitle[title]]);
+        const { error } = await sb.from("book_texts").delete().eq("book_id", bookIds[title]);
+        if (error) throw new Error("Не удалось удалить текст: " + error.message);
+        await loadCatalog();
+        return;
+    }
     const t = serverTexts[title];
     if (!t) return;
     await sb.storage.from("user-texts").remove([t.file_path]);
