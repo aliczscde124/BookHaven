@@ -303,3 +303,6 @@ drop policy "texts: загружает в свою папку" on storage.object
 create policy "texts: загружает админ" on storage.objects
   for insert to authenticated
   with check (bucket_id = 'user-texts' and public.is_admin());
+
+-- ===== Изменение 3: уведомление о новых текстах книг в реальном времени =====
+alter publication supabase_realtime add table public.book_texts;

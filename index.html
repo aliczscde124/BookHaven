@@ -251,6 +251,9 @@ body.is-admin #admin.admin-only{display:block}
 .ed-row{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid #D8E7EC}
 .ed-row small{display:block;color:var(--muted);margin-top:2px}
 .ed-row .btn{padding:7px 12px;font-size:13px}
+/* МЕТКА «ТЕКСТ НА САЙТЕ» */
+.text-badge{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:#137F80;margin:0 0 10px}
+.text-badge .new{background:#137F80;color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:bold}
 /* FOOTER */
 footer{margin-top:50px;padding:28px;background:linear-gradient(135deg,var(--dark-blue),var(--blue));color:white;text-align:center;font-family:var(--serif);font-style:italic}
 footer small{display:block;margin-top:6px;opacity:.75;font-size:13px}
@@ -1707,18 +1710,35 @@ function bookCardHTML(b) {
     </div>`;
 }
 
+function markTextBadges() {
+    document.querySelectorAll(".book-card:not([data-custom])").forEach(card => {
+        const old = card.querySelector(".text-badge");
+        if (old) old.remove();
+        const at = bookTextAt[card.dataset.title];
+        if (!at) return;
+        const d = new Date(at);
+        const fresh = Date.now() - d.getTime() < 7 * 24 * 3600 * 1000;
+        const el = document.createElement("div");
+        el.className = "text-badge";
+        el.innerHTML = `${ic("book")} Текст на сайте · ${d.toLocaleDateString("ru-RU")}${fresh ? ' <b class="new">Новое</b>' : ""}`;
+        card.querySelector(".rating").after(el);
+    });
+}
+
 async function loadCatalog() {
     const { data } = await sb.from("books").select("id,title,author,genre,pages,description").order("id");
     booksList = data || [];
     bookIds = Object.fromEntries(booksList.map(b => [b.title, b.id]));
     booksList.forEach(b => { descriptions[b.title] = b.description; });
-    const { data: bt } = await sb.from("book_texts").select("book_id,file_path");
-    const pathById = Object.fromEntries((bt || []).map(t => [t.book_id, t.file_path]));
-    bookTextByTitle = Object.fromEntries(booksList.filter(b => pathById[b.id]).map(b => [b.title, pathById[b.id]]));
+    const { data: bt } = await sb.from("book_texts").select("book_id,file_path,updated_at");
+    const infoById = Object.fromEntries((bt || []).map(t => [t.book_id, t]));
+    bookTextByTitle = Object.fromEntries(booksList.filter(b => infoById[b.id]).map(b => [b.title, infoById[b.id].file_path]));
+    bookTextAt = Object.fromEntries(booksList.filter(b => infoById[b.id]).map(b => [b.title, infoById[b.id].updated_at]));
     const box = document.querySelector(".books");
     box.querySelectorAll(".book-card:not([data-custom])").forEach(c => c.remove());
     box.insertAdjacentHTML("afterbegin", booksList.map(bookCardHTML).join(""));
     box.querySelectorAll(".book-card:not([data-custom])").forEach(attachTools);
+    markTextBadges();
     refreshTextTools();
     applyFilters();
     updateAllBookRatings();
@@ -1857,6 +1877,17 @@ window.setRole = setRole;
 window.removeTextAdmin = removeTextAdmin;
 window.loadCatalog = loadCatalog;
 
+/* НОВЫЙ ТЕКСТ КНИГИ: уведомление всем открытым страницам, включая гостей */
+sb.channel("book-texts-live")
+    .on("postgres_changes", { event: "*", schema: "public", table: "book_texts" }, async payload => {
+        const row = payload.eventType === "DELETE" ? payload.old : payload.new;
+        await loadCatalog();
+        if (payload.eventType === "DELETE" || !row) return;
+        const title = Object.keys(bookIds).find(t => bookIds[t] === row.book_id);
+        if (title) toast("Администратор добавил текст книги «" + title + "»");
+    })
+    .subscribe();
+
 /* ОКНО ВХОДА поверх сайта */
 window.showAuth = tab => {
     window.showAuthTab(tab || "login");
@@ -1868,6 +1899,7 @@ document.getElementById("authGate").addEventListener("click", e => { if (e.targe
 /* СВОИ ТЕКСТЫ В ХРАНИЛИЩЕ (вошедший пользователь) */
 let serverTexts = {};   // название → { id, file_path, words, book_id }
 let bookTextByTitle = {};   // название книги → путь к общему тексту книги
+let bookTextAt = {};        // название книги → когда администратор выложил текст
 window.isSignedIn = () => !!me;
 window.isAdmin = () => !!(me && me.role === "admin");
 window.serverTitles = () => [...Object.keys(serverTexts), ...Object.keys(bookTextByTitle)];
